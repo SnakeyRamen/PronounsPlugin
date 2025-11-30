@@ -6,13 +6,7 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Level;
@@ -46,34 +40,26 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
     private final Gson gson = new Gson();
     private volatile boolean saveScheduled = false;
     private static final Pattern HEX_PATTERN = Pattern.compile("^#[a-fA-F0-9]{6}$");
-
     private static final List<String> AVAILABLE_COLORS = NamedTextColor.NAMES.keys().stream().toList();
-
     private BukkitAudiences adventure;
-    
     private boolean isPaperServer = false;
+    private boolean isFolia = false;
     private Method paperDisplayNameMethod = null;
     private Method paperPlayerListNameMethod = null;
 
     @Override
     public void onEnable() {
         getLogger().info("Enabling PronounsPlugin...");
-        
-        detectPaperCompatibility();
-        
+        detectServerType();
         saveDefaultConfig();
-        
         pronounsFile = new File(getDataFolder(), "pronouns.json");
-        
         pronounsData = new ConcurrentHashMap<>();
-        
         loadPronounsDataAsync().thenRun(() -> {
             getLogger().info("Pronouns data loaded successfully!");
         }).exceptionally(throwable -> {
             getLogger().log(Level.SEVERE, "Failed to load pronouns data: {0}", throwable.getMessage());
             return null;
         });
-
         var pronounsCommand = getCommand("pronouns");
         if (pronounsCommand == null) {
             getLogger().severe("Failed to register '/pronouns' command. Check plugin.yml.");
@@ -81,110 +67,35 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             pronounsCommand.setExecutor(this);
             pronounsCommand.setTabCompleter(new PronounsTabCompleter());
         }
-
         getServer().getPluginManager().registerEvents(this, this);
-
         if (Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             new PronounsExpansion(this).register();
-            getLogger().info("PlaceholderAPI found. Registered %pronounsplugin_pronouns%");
+            getLogger().info("PlaceholderAPI found. Registered %pronouns_pronouns%");
         } else {
             getLogger().warning("PlaceholderAPI not found! Pronoun placeholders will not work.");
         }
-
         setupBStatsCharts();
-
         this.adventure = BukkitAudiences.create(this);
-        
-        getLogger().info("Running on " + (isPaperServer ? "Paper" : "Spigot") + " - compatibility mode enabled");
+        getLogger().info("Running on " + (isFolia ? "Folia" : (isPaperServer ? "Paper" : "Spigot")) + " - compatibility mode enabled");
     }
 
-    private void detectPaperCompatibility() {
+    private void detectServerType() {
         try {
-            paperDisplayNameMethod = Player.class.getMethod("displayName", Component.class);
-            paperPlayerListNameMethod = Player.class.getMethod("playerListName", Component.class);
+            Class.forName("io.papermc.paper.threadedregions.RegionizedServer");
+            isFolia = true;
             isPaperServer = true;
-            getLogger().info("Paper server detected - using enhanced display name features");
-        } catch (NoSuchMethodException e) {
-            isPaperServer = false;
-            getLogger().info("Spigot server detected - using legacy display name compatibility");
+            getLogger().info("Folia server detected - using region-safe schedulers");
+        } catch (ClassNotFoundException ignored) {
+            try {
+                paperDisplayNameMethod = Player.class.getMethod("displayName", Component.class);
+                paperPlayerListNameMethod = Player.class.getMethod("playerListName", Component.class);
+                isPaperServer = true;
+                getLogger().info("Paper server detected - using enhanced display name features");
+            } catch (NoSuchMethodException e) {
+                isPaperServer = false;
+                getLogger().info("Spigot server detected - using legacy name compatibility");
+            }
         }
-    }
-
-    private void setupBStatsCharts() {
-        Metrics metrics = new Metrics(this, 26748);
-        
-        metrics.addCustomChart(new Metrics.AdvancedPie("color_usage", () -> {
-            Map<String, Integer> colorCounts = new HashMap<>();
-            
-            for (String data : pronounsData.values()) {
-                String colorName;
-                
-                if (data.startsWith("GRADIENT:")) {
-                    colorName = "Gradient";
-                } else {
-                    String[] parts = data.split(":", 2);
-                    if (parts.length >= 1) {
-                        colorName = parts[0].toLowerCase().replace("_", " ");
-                        colorName = Arrays.stream(colorName.split(" "))
-                                .map(word -> word.substring(0, 1).toUpperCase() + word.substring(1))
-                                .collect(Collectors.joining(" "));
-                    } else {
-                        colorName = "Unknown";
-                    }
-                }
-                
-                colorCounts.merge(colorName, 1, Integer::sum);
-            }
-            
-            return colorCounts.isEmpty() ? null : colorCounts;
-        }));
-        
-        metrics.addCustomChart(new Metrics.SimplePie("has_pronouns", () -> {
-            int totalPlayers = Bukkit.getOnlinePlayers().size();
-            int playersWithPronouns = 0;
-            
-            for (Player player : Bukkit.getOnlinePlayers()) {
-                if (pronounsData.containsKey(player.getUniqueId())) {
-                    playersWithPronouns++;
-                }
-            }
-            
-            if (totalPlayers == 0) return "No players online";
-            
-            double percentage = (double) playersWithPronouns / totalPlayers * 100;
-            
-            if (percentage == 0) return "0% have pronouns";
-            else if (percentage <= 25) return "1-25% have pronouns";
-            else if (percentage <= 50) return "26-50% have pronouns";
-            else if (percentage <= 75) return "51-75% have pronouns";
-            else return "76-100% have pronouns";
-        }));
-        
-        metrics.addCustomChart(new Metrics.SimplePie("gradient_usage", () -> {
-            int gradientCount = 0;
-            int regularCount = 0;
-            
-            for (String data : pronounsData.values()) {
-                if (data.startsWith("GRADIENT:")) {
-                    gradientCount++;
-                } else {
-                    regularCount++;
-                }
-            }
-            
-            if (gradientCount == 0 && regularCount == 0) return null;
-            
-            if (gradientCount == 0) return "Regular colors only";
-            if (regularCount == 0) return "Gradients only";
-            
-            double gradientPercentage = (double) gradientCount / (gradientCount + regularCount) * 100;
-            
-            if (gradientPercentage <= 10) return "1-10% gradients";
-            else if (gradientPercentage <= 25) return "11-25% gradients";
-            else if (gradientPercentage <= 50) return "26-50% gradients";
-            else if (gradientPercentage <= 75) return "51-75% gradients";
-            else return "76-100% gradients";
-        }));
     }
 
     @Override
@@ -203,7 +114,12 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onPlayerJoin(PlayerJoinEvent event) {
-        Bukkit.getScheduler().runTask(this, () -> updatePlayerName(event.getPlayer()));
+        Player player = event.getPlayer();
+        if (isFolia) {
+            Bukkit.getRegionScheduler().run(this, player.getLocation(), task -> updatePlayerName(player));
+        } else {
+            Bukkit.getScheduler().runTask(this, () -> updatePlayerName(player));
+        }
     }
 
     public Map<UUID, String> getPronounsData() {
@@ -216,9 +132,7 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             sendMsg(sender, "<red>Usage: /pronouns <set|remove|reload>");
             return false;
         }
-
         String subCommand = args[0].toLowerCase();
-
         switch (subCommand) {
             case "set" -> {
                 return handleSetCommand(sender, args);
@@ -239,7 +153,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             }
             default -> sendMsg(sender, "<red>Unknown subcommand. Use /pronouns <set|remove|reload>.");
         }
-
         return true;
     }
 
@@ -249,7 +162,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             sendMsg(sender, message);
             return false;
         }
-
         if (args.length < 3) {
             sendMsg(sender, "<red>Usage: /pronouns set <color|gradient> <color_name|preset> <pronouns>");
             sendMsg(sender, "<yellow>Examples:");
@@ -258,9 +170,7 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             sendMsg(sender, "<yellow>  /pronouns set gradient #ff0000 #0000ff she/her");
             return false;
         }
-
         String firstArg = args[1].toLowerCase();
-        
         if (firstArg.equals("gradient")) {
             return handleGradientSet(player, args);
         } else {
@@ -285,7 +195,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             }
             return false;
         }
-
         if (sender.isOp()) {
             Player target = Bukkit.getPlayer(args[1]);
             if (target != null) {
@@ -313,27 +222,19 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
         if (color == null) {
             color = NamedTextColor.GRAY;
         }
-
         String pronouns = String.join(" ", Arrays.copyOfRange(args, 2, args.length));
-        
         int maxLength = getConfig().getInt("general.max-pronoun-length", 20);
         if (pronouns.length() > maxLength) {
-            @SuppressWarnings("null")
             String message = getConfig().getString("messages.max-length-exceeded", "&cPronouns too long! Maximum length: {limit} characters.")
                     .replace("{limit}", String.valueOf(maxLength));
             sendMsg(player, message);
             return false;
         }
-        
         pronounsData.put(player.getUniqueId(), color.toString() + ":" + pronouns);
-        
-        @SuppressWarnings("null")
         String baseMessage = getConfig().getString("messages.pronouns-set", "&aYour pronouns have been set to: {pronouns}");
         String formattedMessage = baseMessage.replace("{pronouns}", "[" + pronouns + "]");
         formattedMessage = convertLegacyToMiniMessage(formattedMessage);
-        
         sendMsg(player, formattedMessage);
-        
         updatePlayerName(player);
         scheduleSave();
         return true;
@@ -349,17 +250,13 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             sendMsg(player, "<yellow>  /pronouns set gradient red blue green he/him");
             return false;
         }
-
         List<Color> colors = new ArrayList<>();
         String pronouns;
-        
         String secondArg = args[2].toLowerCase();
         Map<String, String> presets = getGradientPresets();
-        
         if (presets.containsKey(secondArg)) {
             String presetColors = presets.get(secondArg);
             String[] presetColorArray = presetColors.split("\\s+");
-            
             for (String colorStr : presetColorArray) {
                 Color color = parseColor(colorStr.trim());
                 if (color == null) {
@@ -368,12 +265,10 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                 }
                 colors.add(color);
             }
-            
             pronouns = String.join(" ", Arrays.copyOfRange(args, 3, args.length));
             sendMsg(player, "<green>Using preset: <gold>" + secondArg);
         } else {
             int pronounStartIndex = -1;
-            
             for (int i = 2; i < args.length; i++) {
                 Color color = parseColor(args[i]);
                 if (color == null) {
@@ -382,48 +277,37 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                 }
                 colors.add(color);
             }
-            
             if (pronounStartIndex == -1) {
                 sendMsg(player, "<red>No pronouns specified! Format: /pronouns set gradient <colors...> <pronouns>");
                 return false;
             }
-            
             if (colors.size() < 2) {
                 sendMsg(player, "<red>Gradient requires at least 2 colors!");
                 return false;
             }
-            
             pronouns = String.join(" ", Arrays.copyOfRange(args, pronounStartIndex, args.length));
-            
             int colorLimit = getConfig().getInt("gradient.color-limit", 5);
             if (colorLimit > 0 && colors.size() > colorLimit && !player.hasPermission("pronouns.gradient-limit-bypass")) {
-                @SuppressWarnings("null")
                 String message = getConfig().getString("messages.gradient-limit-exceeded", "&cToo many colors! Maximum allowed: {limit}.")
                         .replace("{limit}", String.valueOf(colorLimit));
                 sendMsg(player, message);
                 return false;
             }
         }
-        
         int maxLength = getConfig().getInt("general.max-pronoun-length", 20);
         if (pronouns.length() > maxLength) {
-            @SuppressWarnings("null")
             String message = getConfig().getString("messages.max-length-exceeded", "&cPronouns too long! Maximum length: {limit} characters.")
                     .replace("{limit}", String.valueOf(maxLength));
             sendMsg(player, message);
             return false;
         }
-
         String gradientText = applyGradient(pronouns, colors);
         pronounsData.put(player.getUniqueId(), "GRADIENT:" + gradientText);
-        
         String message = getConfig().getString("messages.gradient-applied", "&aApplied gradient to your pronouns:");
         sendMsg(player, message);
-        
         if (getConfig().getBoolean("gradient.show-preview", true)) {
             sendMsg(player, gradientText);
         }
-        
         updatePlayerName(player);
         scheduleSave();
         return true;
@@ -464,7 +348,7 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                 .replace("&o", "<i>")
                 .replace("&r", "<reset>");
     }
-    
+
     @SuppressWarnings("null")
     private void sendMsg(CommandSender sender, String msg) {
         if (sender instanceof Player player) {
@@ -490,7 +374,7 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             sender.sendMessage(legacyMsg);
         }
     }
-    
+
     private String convertToLegacyString(String msg) {
         if (msg.contains("&") || msg.contains("§")) {
             return msg.replace('&', '§');
@@ -527,7 +411,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             TextColor tc = TextColor.color(colors.get(0).getRGB());
             return "§x" + String.format("%06x", tc.value()).replaceAll("(.)", "§$1") + text + "§r";
         }
-        
         StringBuilder result = new StringBuilder();
         int textLength = text.length();
         for (int i = 0; i < textLength; i++) {
@@ -539,7 +422,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             Color color1 = colors.get(segmentIndex);
             Color color2 = colors.get(segmentIndex + 1);
             Color interpolated = interpolateColor(color1, color2, segmentPosition);
-            
             String hexColor = String.format("%06x", interpolated.getRGB() & 0xFFFFFF);
             result.append("§x")
                   .append("§").append(hexColor.charAt(0))
@@ -558,7 +440,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
         int r = (int) (c1.getRed() + t * (c2.getRed() - c1.getRed()));
         int g = (int) (c1.getGreen() + t * (c2.getGreen() - c1.getGreen()));
         int b = (int) (c1.getBlue() + t * (c2.getBlue() - c1.getBlue()));
-        
         return new Color(r, g, b);
     }
 
@@ -584,6 +465,24 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
         return presets;
     }
 
+    private void scheduleSave() {
+        if (!saveScheduled && getConfig().getBoolean("general.auto-save", true)) {
+            saveScheduled = true;
+            long delayTicks = getConfig().getLong("general.save-delay", 1) * 20L;
+            if (isFolia) {
+                Bukkit.getGlobalRegionScheduler().runDelayed(this, task -> {
+                    savePronounsDataAsync();
+                    saveScheduled = false;
+                }, delayTicks);
+            } else {
+                Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
+                    savePronounsDataAsync();
+                    saveScheduled = false;
+                }, delayTicks);
+            }
+        }
+    }
+
     private CompletableFuture<Void> loadPronounsDataAsync() {
         return CompletableFuture.runAsync(() -> {
             if (!pronounsFile.exists()) {
@@ -597,7 +496,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                     return;
                 }
             }
-
             try {
                 String content = new String(Files.readAllBytes(pronounsFile.toPath()));
                 Type type = new TypeToken<Map<UUID, String>>(){}.getType();
@@ -610,17 +508,6 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                 getLogger().log(Level.SEVERE, "Exception:", e);
             }
         });
-    }
-
-    private void scheduleSave() {
-        if (!saveScheduled && getConfig().getBoolean("general.auto-save", true)) {
-            saveScheduled = true;
-            long delay = getConfig().getLong("general.save-delay", 1) * 20L;
-            Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
-                savePronounsDataAsync();
-                saveScheduled = false;
-            }, delay);
-        }
     }
 
     private void savePronounsDataAsync() {
@@ -650,14 +537,11 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
         if (!getConfig().getBoolean("general.update-display-names", true)) {
             return;
         }
-        
         String storedData = pronounsData.get(player.getUniqueId());
         String playerName = player.getName();
-        
         if (storedData != null) {
             Component formattedName;
             Component tabListName;
-            
             if (storedData.startsWith("GRADIENT:")) {
                 String gradientText = storedData.substring(9);
                 Component gradientComponent = LegacyComponentSerializer.legacySection().deserialize(gradientText);
@@ -668,22 +552,18 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                 NamedTextColor color = NamedTextColor.NAMES.value(parts[0].toLowerCase());
                 if (color == null) color = NamedTextColor.GRAY;
                 String pronouns = parts[1];
-                
                 formattedName = Component.text("[", color).append(Component.text(pronouns, color)).append(Component.text("] ")).append(Component.text(playerName));
                 tabListName = Component.text(playerName).append(Component.text(" [" + pronouns + "]"));
             }
-            
             if (isPaperServer && paperDisplayNameMethod != null && paperPlayerListNameMethod != null) {
                 try {
                     paperDisplayNameMethod.invoke(player, formattedName);
                     player.setCustomName(LegacyComponentSerializer.legacySection().serialize(formattedName));
                     player.setCustomNameVisible(getConfig().getBoolean("chat.show-above-head", true));
-                    
                     if (getConfig().getBoolean("chat.show-in-tab-list", true)) {
                         paperPlayerListNameMethod.invoke(player, tabListName);
                     }
                 } catch (Exception e) {
-                    getLogger().warning("Failed to use Paper display name methods, falling back to Spigot compatibility: " + e.getMessage());
                     setSpigotDisplayName(player, formattedName, tabListName);
                 }
             } else {
@@ -712,16 +592,14 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
             }
         }
     }
-    
+
     @SuppressWarnings("deprecation")
     private void setSpigotDisplayName(Player player, Component formattedName, Component tabListName) {
         String legacyFormattedName = LegacyComponentSerializer.legacySection().serialize(formattedName);
         String legacyTabName = LegacyComponentSerializer.legacySection().serialize(tabListName);
-        
         player.setDisplayName(legacyFormattedName);
         player.setCustomName(legacyFormattedName);
         player.setCustomNameVisible(getConfig().getBoolean("chat.show-above-head", true));
-        
         if (getConfig().getBoolean("chat.show-in-tab-list", true)) {
             player.setPlayerListName(legacyTabName);
         }
@@ -742,20 +620,15 @@ public class PronounsPlugin extends JavaPlugin implements Listener {
                         .collect(Collectors.toList());
             } else if (args.length == 3 && args[0].equalsIgnoreCase("set") && args[1].equalsIgnoreCase("gradient")) {
                 List<String> suggestions = new ArrayList<>();
-                
                 Map<String, String> presets = getGradientPresets();
                 suggestions.addAll(presets.keySet());
-                
                 suggestions.addAll(AVAILABLE_COLORS);
-                
                 suggestions.addAll(Arrays.asList("#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff", "#ffffff", "#000000"));
-                
                 return suggestions.stream()
                         .filter(s -> s.startsWith(args[2].toLowerCase()))
                         .collect(Collectors.toList());
             } else if (args.length >= 4 && args[0].equalsIgnoreCase("set") && args[1].equalsIgnoreCase("gradient")) {
                 Map<String, String> presets = getGradientPresets();
-                
                 if (!presets.containsKey(args[2].toLowerCase())) {
                     Color lastColor = parseColor(args[args.length - 1]);
                     if (lastColor != null) {
